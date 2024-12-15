@@ -18,7 +18,7 @@ return new class extends Migration
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->string('word'); // Palabra a adivinar
             $table->boolean('is_active')->default(true); // Indica si el juego está activo
-            $table->integer('remaining_attempts')->default(5); // Intentos restantes
+            $table->integer('remaining_attempts')->env('AHORCADO_MAX_ATTEMPTS'); // Intentos restantes
             $table->string('status')->default('por empezar'); // Estado del juego: 'por empezar', 'en progreso', 'finalizado', 'abandonada'
             $table->foreignId('active_player_id')->nullable()->constrained('users')->onDelete('set null'); // Jugador activo
             $table->json('letters_attempted')->nullable(); // Letras intentadas, almacenadas como JSON

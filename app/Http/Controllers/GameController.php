@@ -26,7 +26,7 @@ class GameController extends Controller
         $palabra = null;
         $maxAttempts = env('AHORCADO_MAX_ATTEMPTS'); // Obtener intentos del .env
 
-        while ($maxAttempts > 0) {
+        while (env('AHORCADO_MAX_ATTEMPTS') > 0) {
             $response = Http::get('https://clientes.api.greenborn.com.ar/public-random-word');
             if ($response->successful()) {
                 $palabraCandidata = trim($response->body(), '[]" ');
@@ -45,7 +45,7 @@ class GameController extends Controller
         $game = Game::create([
             'user_id' => $user->id,
             'word' => $palabra,
-            'remaining_attempts' => $maxAttempts, // Inicializar intentos
+            'remaining_attempts' => env('AHORCADO_MAX_ATTEMPTS'), // Inicializar intentos
             'is_active' => false,
             'status' => 'por empezar',
             'letters_attempted' => [],
