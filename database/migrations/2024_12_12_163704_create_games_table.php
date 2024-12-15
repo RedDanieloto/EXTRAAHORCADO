@@ -17,8 +17,10 @@ return new class extends Migration
             $table->id();
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->string('word');
-            $table->integer('remaining_attempts')->default(5);
             $table->boolean('is_active')->default(true);
+            $table->integer('remaining_attempts')->default(5);
+            $table->string('status')->default('por empezar'); // Estado del juego: 'por empezar', 'en progreso', 'finalizado'
+            $table->foreignId('active_player_id')->nullable()->constrained('users')->onDelete('set null'); // Jugador activo
             $table->timestamps();
         });
     }

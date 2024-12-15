@@ -14,6 +14,8 @@ class Game extends Model
         'word',
         'remaining_attempts',
         'is_active',
+        'status', // Agregado
+        'active_player_id', // Agregado
     ];
 
     protected $casts = [

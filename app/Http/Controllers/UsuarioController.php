@@ -18,6 +18,8 @@ class UsuarioController extends Controller
     {
         $this->twilio = new Client(env('TWILIO_SID'), env('TWILIO_AUTH_TOKEN'));
     }
+
+    // Registrar un administrador
     public function registerAdmin(Request $request)
     {
         $data = $request->validate([
@@ -25,14 +27,19 @@ class UsuarioController extends Controller
             'phone' => 'required|string|unique:users,phone|max:15',
             'password' => 'required|string|min:6',
             'admin_code' => 'required|string'
+        ], [
+            'name.required' => 'El campo nombre es obligatorio.',
+            'phone.required' => 'El campo teléfono es obligatorio.',
+            'phone.unique' => 'El teléfono ya está registrado.',
+            'password.required' => 'El campo contraseña es obligatorio.',
+            'password.min' => 'La contraseña debe tener al menos 6 caracteres.',
+            'admin_code.required' => 'El código de administrador es obligatorio.',
         ]);
 
-        // Validar si el código proporcionado coincide con el código especial
         if ($data['admin_code'] !== self::ADMIN_CODE) {
             return response()->json(['message' => 'Código de administrador incorrecto.'], 403);
         }
 
-        // Crear el usuario como administrador
         $user = User::create([
             'name' => $data['name'],
             'phone' => $data['phone'],
@@ -44,50 +51,57 @@ class UsuarioController extends Controller
         return response()->json(['message' => 'Administrador registrado exitosamente.', 'user' => $user]);
     }
 
+    // Enviar un código de verificación por WhatsApp
     public function sendVerification(Request $request)
-{
-    // Validar los datos recibidos
-    $data = $request->validate([
-        'name' => 'required|string|max:255',         // Nombre obligatorio, máximo 255 caracteres
-        'phone' => 'required|string|unique:users,phone|max:15', // Teléfono único y máximo 15 caracteres
-        'password' => 'required|string|min:6',      // Contraseña obligatoria, mínimo 6 caracteres
-    ]);
-
-    try {
-        // Crear el usuario si no existe
-        $user = User::create([
-            'name' => $data['name'],
-            'phone' => $data['phone'],
-            'password' => bcrypt($data['password']),
-            'role' => 'player', 
-            'is_active' => false,
+    {
+        $data = $request->validate([
+            'name' => 'required|string|max:255',
+            'phone' => 'required|string|unique:users,phone|max:15',
+            'password' => 'required|string|min:6',
+        ], [
+            'name.required' => 'El campo nombre es obligatorio.',
+            'phone.required' => 'El campo teléfono es obligatorio.',
+            'phone.unique' => 'El teléfono ya está registrado.',
+            'password.required' => 'El campo contraseña es obligatorio.',
+            'password.min' => 'La contraseña debe tener al menos 6 caracteres.',
         ]);
 
-        // Generar código de verificación
-        $code = rand(100000, 999999);
+        try {
+            $user = User::create([
+                'name' => $data['name'],
+                'phone' => $data['phone'],
+                'password' => bcrypt($data['password']),
+                'role' => 'player',
+                'is_active' => false,
+            ]);
 
-        // Guardar el código en caché
-        Cache::put('verification_' . $data['phone'], $code, now()->addMinutes(10));
+            $code = rand(100000, 999999);
+            Cache::put('verification_' . $data['phone'], $code, now()->addMinutes(10));
 
-        // Enviar mensaje por WhatsApp
-        $this->twilio->messages->create(
-            "whatsapp:" . $data['phone'],
-            [
-                'from' => 'whatsapp:' . env('TWILIO_WHATSAPP_NUMBER'),
-                'body' => "Tu código de verificación es: $code. Por favor, no lo compartas con nadie.",
-            ]
-        );
+            $this->twilio->messages->create(
+                "whatsapp:" . $data['phone'],
+                [
+                    'from' => 'whatsapp:' . env('TWILIO_WHATSAPP_NUMBER'),
+                    'body' => "Tu código de verificación es: $code. Por favor, no lo compartas con nadie.",
+                ]
+            );
 
-        return response()->json(['message' => 'Código enviado exitosamente por WhatsApp.'], 200);
-    } catch (\Exception $e) {
-        return response()->json(['message' => 'Error al enviar el mensaje: ' . $e->getMessage()], 500);
+            return response()->json(['message' => 'Código enviado exitosamente por WhatsApp.'], 200);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Error al enviar el mensaje: ' . $e->getMessage()], 500);
+        }
     }
-}
+
+    // Verificar un código de activación
     public function verifyCode(Request $request)
     {
         $data = $request->validate([
             'phone' => 'required|string|exists:users,phone',
             'code' => 'required|string',
+        ], [
+            'phone.required' => 'El campo teléfono es obligatorio.',
+            'phone.exists' => 'El teléfono no está registrado.',
+            'code.required' => 'El campo código es obligatorio.',
         ]);
 
         try {
@@ -109,19 +123,23 @@ class UsuarioController extends Controller
         }
     }
 
+    // Cerrar sesión
     public function logout(Request $request)
-{
-    // Revoke the user's token
-    $request->user()->currentAccessToken()->delete();
+    {
+        $request->user()->currentAccessToken()->delete();
+        return response()->json(['message' => 'Sesión cerrada exitosamente.'], 200);
+    }
 
-    return response()->json(['message' => 'Sesión cerrada exitosamente.'], 200);
-}
-
+    // Iniciar sesión
     public function login(Request $request)
     {
         $data = $request->validate([
             'phone' => 'required|string|exists:users,phone',
             'password' => 'required|string',
+        ], [
+            'phone.required' => 'El campo teléfono es obligatorio.',
+            'phone.exists' => 'El teléfono no está registrado.',
+            'password.required' => 'El campo contraseña es obligatorio.',
         ]);
 
         $user = User::where('phone', $data['phone'])->first();
