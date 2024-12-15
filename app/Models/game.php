@@ -14,12 +14,14 @@ class Game extends Model
         'word',
         'remaining_attempts',
         'is_active',
-        'status', // Agregado
-        'active_player_id', // Agregado
+        'status', // Estado del juego: 'por empezar', 'en progreso', 'finalizado', 'abandonada'
+        'active_player_id', // Jugador activo
+        'letters_attempted', // Letras intentadas
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
+        'letters_attempted' => 'array', // Almacenar las letras intentadas como JSON
     ];
 
     public function user()

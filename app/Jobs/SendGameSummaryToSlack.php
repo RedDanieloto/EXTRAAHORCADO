@@ -40,11 +40,19 @@ class SendGameSummaryToSlack implements ShouldQueue
             return "{$attempt->word} - " . ($attempt->is_correct ? "Correcto" : "Incorrecto");
         })->implode("\n");
 
-        $message = "*Resumen del Juego*\n" .
+        $guessedLetters = $this->game->attempts()
+            ->get()
+            ->pluck('word')
+            ->unique()
+            ->implode(', ');
+
+        $message = "*Resumen del Juego - El Ahorcado*\n" .
             "Usuario: {$this->game->user->name}\n" .
-            "Estado: {$this->status}\n" .
+            "Estado del juego: {$this->status}\n" .
             "Palabra oculta: {$this->game->word}\n" .
-            "Intentos:\n{$attempts}";
+            "Letras intentadas: {$guessedLetters}\n" .
+            "Resultado de intentos:\n{$attempts}\n" .
+            "Intentos restantes: {$this->game->remaining_attempts}";
 
         Http::post(env('SLACK_WEBHOOK_URL'), [
             'text' => $message,
