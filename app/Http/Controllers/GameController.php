@@ -159,7 +159,7 @@ class GameController extends Controller
         // Verificar que la partida exista y esté disponible
         $game = Game::find($data['game_id']);
         if ($game->user_id !== $user->id || $game->status !== 'por empezar') {
-            return response()->json(['mensaje' => 'No puedes unirte a esta partida.'], 403);
+            return response()->json(['mensaje' => 'No puedes unirte a esta partida, o existe o no te pertenece.'], 403);
         }
     
         // Actualizar la partida como "en progreso"
@@ -265,8 +265,13 @@ class GameController extends Controller
     public function history()
     {
         $this->ensureAccountIsActive();
-
+    
         $games = Game::where('user_id', Auth::id())->whereIn('status', ['ganada', 'perdida', 'abandonada'])->get();
+    
+        if ($games->isEmpty()) {
+            return response()->json(['mensaje' => 'No has jugado ninguna partida para mostrar, ¡DIVIÉRTETE!'], 404);
+        }
+    
         return response()->json(['historial' => $games]);
     }
 
