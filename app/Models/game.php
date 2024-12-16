@@ -12,6 +12,7 @@ class Game extends Model
     protected $fillable = [
         'user_id',
         'word',
+        'progress', // Progreso parcial de la palabra en el juego de ahorcado
         'remaining_attempts',
         'is_active',
         'status', // Estado del juego: 'por empezar', 'en progreso', 'finalizado', 'abandonada'

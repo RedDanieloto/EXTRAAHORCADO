@@ -27,13 +27,6 @@ class UsuarioController extends Controller
             'phone' => 'required|string|unique:users,phone|max:15',
             'password' => 'required|string|min:6',
             'admin_code' => 'required|string'
-        ], [
-            'name.required' => 'El campo nombre es obligatorio.',
-            'phone.required' => 'El campo teléfono es obligatorio.',
-            'phone.unique' => 'El teléfono ya está registrado.',
-            'password.required' => 'El campo contraseña es obligatorio.',
-            'password.min' => 'La contraseña debe tener al menos 6 caracteres.',
-            'admin_code.required' => 'El código de administrador es obligatorio.',
         ]);
 
         if ($data['admin_code'] !== self::ADMIN_CODE) {
@@ -58,13 +51,13 @@ class UsuarioController extends Controller
             'name' => 'required|string|max:255',
             'phone' => 'required|string|unique:users,phone|max:15',
             'password' => 'required|string|min:6',
-        ], [
-            'name.required' => 'El campo nombre es obligatorio.',
-            'phone.required' => 'El campo teléfono es obligatorio.',
-            'phone.unique' => 'El teléfono ya está registrado.',
-            'password.required' => 'El campo contraseña es obligatorio.',
-            'password.min' => 'La contraseña debe tener al menos 6 caracteres.',
         ]);
+
+        // Verificar si el usuario está desactivado por administrador
+        $existingUser = User::where('phone', $data['phone'])->first();
+        if ($existingUser && $existingUser->deactivation_reason === 'admin_disabled') {
+            return response()->json(['message' => 'Cuenta desactivada por administrador.'], 403);
+        }
 
         try {
             $user = User::create([
@@ -92,24 +85,59 @@ class UsuarioController extends Controller
         }
     }
 
+    // Reenviar código de verificación
+    public function resendVerificationCode(Request $request)
+    {
+        $data = $request->validate([
+            'phone' => 'required|string|exists:users,phone',
+        ]);
+
+        $user = User::where('phone', $data['phone'])->first();
+
+        // Verificar si la cuenta está desactivada por administrador
+        if ($user->deactivation_reason === 'admin_disabled') {
+            return response()->json(['message' => 'Cuenta desactivada por administrador.'], 403);
+        }
+
+        try {
+            $code = rand(100000, 999999);
+            Cache::put('verification_' . $data['phone'], $code, now()->addMinutes(10));
+
+            $this->twilio->messages->create(
+                "whatsapp:" . $data['phone'],
+                [
+                    'from' => 'whatsapp:' . env('TWILIO_WHATSAPP_NUMBER'),
+                    'body' => "Tu código de verificación es: $code. Por favor, no lo compartas con nadie.",
+                ]
+            );
+
+            return response()->json(['message' => 'Código reenviado exitosamente por WhatsApp.']);
+        } catch (\Exception $e) {
+            return response()->json(['message' => 'Error al reenviar el código: ' . $e->getMessage()], 500);
+        }
+    }
+
     // Verificar un código de activación
     public function verifyCode(Request $request)
     {
         $data = $request->validate([
             'phone' => 'required|string|exists:users,phone',
             'code' => 'required|string',
-        ], [
-            'phone.required' => 'El campo teléfono es obligatorio.',
-            'phone.exists' => 'El teléfono no está registrado.',
-            'code.required' => 'El campo código es obligatorio.',
         ]);
+
+        $user = User::where('phone', $data['phone'])->first();
+
+        // Verificar si la cuenta fue desactivada por el administrador
+        if ($user->deactivation_reason === 'admin_disabled') {
+            return response()->json(['message' => 'Cuenta desactivada por administrador.'], 403);
+        }
 
         try {
             $storedCode = Cache::get('verification_' . $data['phone']);
 
             if ($storedCode && $storedCode == $data['code']) {
-                $user = User::where('phone', $data['phone'])->first();
                 $user->is_active = true;
+                $user->deactivation_reason = null; // Limpiar motivo de desactivación si existía
                 $user->save();
 
                 Cache::forget('verification_' . $data['phone']);
@@ -123,29 +151,19 @@ class UsuarioController extends Controller
         }
     }
 
-    // Cerrar sesión
-    public function logout(Request $request)
-    {
-        $request->user()->currentAccessToken()->delete();
-        return response()->json(['message' => 'Sesión cerrada exitosamente.'], 200);
-    }
-
     // Iniciar sesión
     public function login(Request $request)
     {
         $data = $request->validate([
             'phone' => 'required|string|exists:users,phone',
             'password' => 'required|string',
-        ], [
-            'phone.required' => 'El campo teléfono es obligatorio.',
-            'phone.exists' => 'El teléfono no está registrado.',
-            'password.required' => 'El campo contraseña es obligatorio.',
         ]);
 
         $user = User::where('phone', $data['phone'])->first();
 
-        if (!$user->is_active) {
-            return response()->json(['message' => 'El número no ha sido verificado.'], 403);
+        // Verificar si la cuenta está desactivada por administrador
+        if ($user->deactivation_reason === 'admin_disabled') {
+            return response()->json(['message' => 'Cuenta desactivada por administrador.'], 403);
         }
 
         if (!Hash::check($data['password'], $user->password)) {
@@ -159,5 +177,12 @@ class UsuarioController extends Controller
             'token' => $token,
             'user' => $user,
         ]);
+    }
+
+    // Cerrar sesión
+    public function logout(Request $request)
+    {
+        $request->user()->currentAccessToken()->delete();
+        return response()->json(['message' => 'Sesión cerrada exitosamente.'], 200);
     }
 }

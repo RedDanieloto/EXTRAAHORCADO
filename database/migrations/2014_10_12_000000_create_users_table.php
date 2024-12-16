@@ -20,6 +20,7 @@ class CreateUsersTable extends Migration
             $table->string('password'); // Contraseña encriptada
             $table->string('role')->default('player'); // Rol del usuario, por defecto 'player'
             $table->boolean('is_active')->default(false); // Estado de activación de la cuenta
+            
             $table->timestamps(); // Marcas de tiempo created_at y updated_at
         });
     }

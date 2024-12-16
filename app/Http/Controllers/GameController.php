@@ -2,11 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\SendGameSummaryToSlack;
+use App\Models\Game;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use App\Models\Game;
-use App\Jobs\SendGameSummaryToSlack;
 use Twilio\Rest\Client;
 
 class GameController extends Controller
@@ -19,35 +20,43 @@ class GameController extends Controller
         $this->twilio = new Client(env('TWILIO_SID'), env('TWILIO_AUTH_TOKEN'));
     }
 
+    // Verificar si la cuenta del usuario está activa
+    private function ensureAccountIsActive()
+    {
+        $user = Auth::user();
+
+        if (!$user->is_active) {
+            DB::table('personal_access_tokens')->where('tokenable_id', $user->id)->delete();
+            response()->json([
+                'mensaje' => $user->deactivation_reason === 'admin_disabled'
+                    ? 'Tu cuenta está desactivada por un administrador.'
+                    : 'Tu cuenta está desactivada. Contacta a un administrador para reactivarla.',
+            ], 403)->send();
+            exit;
+        }
+    }
+
     // Crear una nueva partida
     public function create()
     {
+        $this->ensureAccountIsActive();
+
         $user = Auth::user();
-        $palabra = null;
-        $maxAttempts = env('AHORCADO_MAX_ATTEMPTS'); // Obtener intentos del .env
+        $word = $this->fetchRandomWord();
 
-        while (env('AHORCADO_MAX_ATTEMPTS') > 0) {
-            $response = Http::get('https://clientes.api.greenborn.com.ar/public-random-word');
-            if ($response->successful()) {
-                $palabraCandidata = trim($response->body(), '[]" ');
-                if (strlen($palabraCandidata) >= 4 && strlen($palabraCandidata) <= 8) {
-                    $palabra = strtolower($palabraCandidata);
-                    break;
-                }
-            }
-            $maxAttempts--;
-        }
-
-        if (!$palabra) {
+        if (!$word) {
             return response()->json(['mensaje' => 'No se pudo obtener una palabra válida.'], 500);
         }
 
+        $maxAttempts = env('AHORCADO_MAX_ATTEMPTS', 7);
+
         $game = Game::create([
             'user_id' => $user->id,
-            'word' => $palabra,
-            'remaining_attempts' => env('AHORCADO_MAX_ATTEMPTS'), // Inicializar intentos
+            'word' => $word,
+            'remaining_attempts' => $maxAttempts,
             'is_active' => false,
             'status' => 'por empezar',
+            'progress' => str_repeat('_', strlen($word)),
             'letters_attempted' => [],
         ]);
 
@@ -56,17 +65,30 @@ class GameController extends Controller
             'partida' => [
                 'id' => $game->id,
                 'status' => $game->status,
-                'word_length' => strlen($palabra),
-                'intentos_restantes' => $game->remaining_attempts,
+                'word_length' => strlen($word),
+                'intentos_restantes' => $maxAttempts,
             ],
         ], 201);
+    }
+
+    private function fetchRandomWord()
+    {
+        $response = Http::get('https://clientes.api.greenborn.com.ar/public-random-word');
+        if ($response->successful()) {
+            $word = trim($response->body(), '[]" ');
+            return (strlen($word) >= 4 && strlen($word) <= 8 && !preg_match('/[ñáéíóú]/i', $word))
+                ? strtolower($word)
+                : null;
+        }
+        return null;
     }
 
     // Consultar partidas disponibles
     public function availableGames()
     {
-        $user = Auth::user();
+        $this->ensureAccountIsActive();
 
+        $user = Auth::user();
         $games = Game::where('user_id', $user->id)
             ->where('status', 'por empezar')
             ->get()
@@ -76,181 +98,184 @@ class GameController extends Controller
                 return $game;
             });
 
-        if ($games->isEmpty()) {
-            return response()->json(['mensaje' => 'No hay partidas disponibles.'], 404);
-        }
-
-        return response()->json(['partidas_disponibles' => $games], 200);
+        return $games->isEmpty()
+            ? response()->json(['mensaje' => 'No hay partidas disponibles.'], 404)
+            : response()->json(['partidas_disponibles' => $games], 200);
     }
+    public function abandon()
+{
+    $this->ensureAccountIsActive();
+
+    $user = Auth::user();
+
+    // Buscar si hay una partida activa del usuario
+    $game = Game::where('active_player_id', $user->id)->where('is_active', true)->first();
+
+    // Validar si no hay una partida activa para abandonar
+    if (!$game) {
+        return response()->json(['mensaje' => 'No tienes ninguna partida activa la cual abandonar.'], 404);
+    }
+
+    // Actualizar el estado de la partida como abandonada
+    $game->update(['is_active' => false, 'status' => 'abandonada']);
+
+    // Enviar resumen a Slack con retraso de un minuto
+    SendGameSummaryToSlack::dispatch($game, 'Abandonada')->delay(now()->addMinute());
+
+    // Enviar notificación por Twilio
+    $this->sendTwilioMessage(
+        $user->phone,
+        'Has abandonado la partida.',
+        implode(' ', str_split($game->progress)),
+        $game->remaining_attempts
+    );
+
+    return response()->json(['mensaje' => 'Has abandonado la partida.'], 200);
+}
 
     // Unirse a una partida
     public function join(Request $request)
     {
+        $this->ensureAccountIsActive();
+    
+        $data = $request->validate(['game_id' => 'required|exists:games,id']);
         $user = Auth::user();
-
-        $data = $request->validate([
-            'game_id' => 'required|exists:games,id',
-        ]);
-
-        $activeGame = Game::where('active_player_id', $user->id)
-            ->where('is_active', true)
-            ->first();
-
+    
+        // Verificar si el usuario ya tiene una partida activa
+        $activeGame = Game::where('active_player_id', $user->id)->where('is_active', true)->first();
         if ($activeGame) {
             return response()->json([
-                'mensaje' => 'Ya tienes una partida activa.',
-                'partida_activa' => $activeGame,
+                'mensaje' => 'Ya tienes una partida activa. Termina o abandona tu partida actual.',
+                'partida_activa' => [
+                    'id' => $activeGame->id,
+                    'status' => $activeGame->status,
+                    'progreso' => implode(' ', str_split($activeGame->progress)), // Progreso con guiones
+                    'intentos_restantes' => $activeGame->remaining_attempts,
+                    'creado_en' => $activeGame->created_at,
+                ],
             ], 400);
         }
-
-        $game = Game::where('id', $data['game_id'])
-            ->where('user_id', $user->id)
-            ->where('status', 'por empezar')
-            ->first();
-
-        if (!$game) {
-            return response()->json(['mensaje' => 'No puedes unirte a esta partida porque no te pertenece o no está disponible.'], 403);
+    
+        // Verificar que la partida exista y esté disponible
+        $game = Game::find($data['game_id']);
+        if ($game->user_id !== $user->id || $game->status !== 'por empezar') {
+            return response()->json(['mensaje' => 'No puedes unirte a esta partida.'], 403);
         }
-
-        $game->update(['active_player_id' => $user->id, 'status' => 'en progreso', 'is_active' => true]);
-
+    
+        // Actualizar la partida como "en progreso"
+        $game->update([
+            'active_player_id' => $user->id,
+            'status' => 'en progreso',
+            'is_active' => true,
+        ]);
+    
         return response()->json([
             'mensaje' => 'Te has unido correctamente a la partida.',
             'partida' => [
                 'id' => $game->id,
-                'status' => $game->status,
                 'word_length' => strlen($game->word),
                 'intentos_restantes' => $game->remaining_attempts,
             ],
-        ], 200);
+        ]);
     }
 
     // Adivinar una letra
     public function guess(Request $request)
     {
+        $this->ensureAccountIsActive();
+
+        $data = $request->validate(['letter' => 'required|string|size:1|regex:/^[a-zA-Z]$/']);
         $user = Auth::user();
 
-        $data = $request->validate([
-            'letter' => 'required|string|size:1|regex:/^[a-zA-Z]+$/',
-        ]);
-
-        $game = Game::where('active_player_id', $user->id)
-            ->where('is_active', true)
-            ->first();
-
+        $game = Game::where('active_player_id', $user->id)->where('is_active', true)->first();
         if (!$game) {
             return response()->json(['mensaje' => 'No tienes ninguna partida activa.'], 404);
         }
 
         $letter = strtolower($data['letter']);
-        if (in_array($letter, $game->letters_attempted)) {
-            return response()->json(['mensaje' => 'Ya intentaste esta letra.'], 400);
+        $lettersAttempted = $game->letters_attempted ?? [];
+
+        if (in_array($letter, $lettersAttempted)) {
+            return response()->json(['mensaje' => 'Letra ya intentada.'], 400);
         }
 
-        $lettersAttempted = $game->letters_attempted;
         $lettersAttempted[] = $letter;
-        $game->update(['letters_attempted' => $lettersAttempted]);
+        $game->letters_attempted = $lettersAttempted;
 
-        $correctLetters = array_intersect(str_split($game->word), $lettersAttempted);
+        $word = str_split($game->word);
+        $progress = str_split($game->progress);
 
-        $maskedWord = '';
-        foreach (str_split($game->word) as $char) {
-            $maskedWord .= in_array($char, $correctLetters) ? $char : '_';
+        $found = false;
+        for ($i = 0; $i < count($word); $i++) {
+            if ($word[$i] === $letter) {
+                $progress[$i] = $letter;
+                $found = true;
+            }
         }
 
-        // Validar si la palabra se completó
-        if ($maskedWord === $game->word) {
-            $game->update(['is_active' => false, 'status' => 'ganada']);
-            $this->sendSlackSummary($game, 'Ganada');
-            $this->sendTwilioMessage($user->phone, "¡Felicidades! Has ganado. La palabra era: {$game->word}.");
-            return response()->json(['mensaje' => '¡Felicidades! Has ganado.', 'palabra' => $game->word], 200);
-        }
-
-        // Validar si la letra es incorrecta y decrementar intentos
-        if (!in_array($letter, str_split($game->word))) {
+        if (!$found) {
             $game->decrement('remaining_attempts');
         }
 
-        // Validar si los intentos se agotaron
+        $game->progress = implode('', $progress);
+        $game->save();
+
+        $formattedProgress = implode(' ', $progress);
+
+        if ($game->progress === $game->word) {
+            $game->update(['is_active' => false, 'status' => 'ganada']);
+            SendGameSummaryToSlack::dispatch($game, 'Ganada')->delay(now()->addMinute());
+            $this->sendTwilioMessage($user->phone, '¡Ganaste!', $formattedProgress, $game->remaining_attempts);
+            return response()->json(['mensaje' => '¡Ganaste!', 'progreso' => $formattedProgress]);
+        }
+
         if ($game->remaining_attempts <= 0) {
             $game->update(['is_active' => false, 'status' => 'perdida']);
-            $this->sendSlackSummary($game, 'Perdida');
-            $this->sendTwilioMessage($user->phone, "Has perdido. La palabra era: {$game->word}.");
-            return response()->json(['mensaje' => 'Has perdido. La palabra era: ' . $game->word], 200);
+            SendGameSummaryToSlack::dispatch($game, 'Perdida')->delay(now()->addMinute());
+            $this->sendTwilioMessage($user->phone, 'Has perdido.', $formattedProgress, $game->remaining_attempts);
+            return response()->json(['mensaje' => 'Has perdido.', 'progreso' => $formattedProgress]);
         }
 
-        $this->sendTwilioMessage($user->phone, "Intento: $letter | Progreso: $maskedWord | Intentos restantes: {$game->remaining_attempts}.");
-        return response()->json(['progreso' => $maskedWord, 'intentos_restantes' => $game->remaining_attempts], 200);
-    }
+        $this->sendTwilioMessage($user->phone, $found ? 'Letra correcta' : 'Letra incorrecta', $formattedProgress, $game->remaining_attempts);
 
-    // Abandonar la partida
-    public function abandon()
-    {
-        $user = Auth::user();
-
-        $activeGame = Game::where('active_player_id', $user->id)
-            ->where('is_active', true)
-            ->first();
-
-        if (!$activeGame) {
-            return response()->json(['mensaje' => 'No tienes ninguna partida activa.'], 404);
-        }
-
-        $activeGame->update([
-            'is_active' => false,
-            'status' => 'abandonada',
+        return response()->json([
+            'mensaje' => $found ? 'Letra correcta.' : 'Letra incorrecta.',
+            'progreso' => $formattedProgress,
+            'intentos_restantes' => $game->remaining_attempts,
         ]);
-
-        $this->sendSlackSummary($activeGame, 'Abandonada');
-        $this->sendTwilioMessage($user->phone, "Has abandonado la partida. La palabra era: {$activeGame->word}");
-
-        return response()->json(['mensaje' => 'Has abandonado la partida.'], 200);
-    }
-
-    // Historial de partidas
-    public function history()
-    {
-        $user = Auth::user();
-
-        $games = Game::where('user_id', $user->id)
-            ->whereIn('status', ['ganada', 'perdida', 'abandonada'])
-            ->get();
-
-        if ($games->isEmpty()) {
-            return response()->json(['mensaje' => 'No tienes partidas registradas.'], 404);
-        }
-
-        return response()->json(['historial' => $games], 200);
     }
 
     // Partida actual
     public function current()
     {
-        $user = Auth::user();
+        $this->ensureAccountIsActive();
 
-        $game = Game::where('active_player_id', $user->id)
-            ->where('is_active', true)
-            ->first();
+        $game = Game::where('active_player_id', Auth::id())->where('is_active', true)->first();
+        if (!$game) return response()->json(['mensaje' => 'No tienes ninguna partida activa.'], 404);
 
-        if (!$game) {
-            return response()->json(['mensaje' => 'No tienes ninguna partida activa.'], 404);
-        }
-
-        return response()->json(['partida_actual' => $game], 200);
+        return response()->json([
+            'partida_actual' => [
+                'progreso' => implode(' ', str_split($game->progress)),
+                'intentos_restantes' => $game->remaining_attempts,
+            ],
+        ]);
     }
 
-    // Enviar resumen a Slack
-    private function sendSlackSummary($game, $estado)
+    // Historial de partidas
+    public function history()
     {
-        SendGameSummaryToSlack::dispatch($game, $estado)->delay(now()->addMinute());
+        $this->ensureAccountIsActive();
+
+        $games = Game::where('user_id', Auth::id())->whereIn('status', ['ganada', 'perdida', 'abandonada'])->get();
+        return response()->json(['historial' => $games]);
     }
 
-    // Enviar mensaje por Twilio
-    private function sendTwilioMessage($to, $message)
+    private function sendTwilioMessage($to, $message, $progress, $remainingAttempts)
     {
-        $this->twilio->messages->create("whatsapp:" . $to, [
+        $body = "{$message} | Progreso: {$progress} | Intentos restantes: {$remainingAttempts}";
+        $this->twilio->messages->create("whatsapp:{$to}", [
             'from' => 'whatsapp:' . env('TWILIO_WHATSAPP_NUMBER'),
-            'body' => $message,
+            'body' => $body,
         ]);
     }
 }
